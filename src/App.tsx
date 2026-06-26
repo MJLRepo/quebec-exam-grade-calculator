@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 
-type ExamWeightPreset = 'secondary45' | 'custom';
+type ExamRule = 'uniform20Bonus' | 'nonUniform' | 'custom';
 
 type GradeScenario = {
   id: string;
@@ -25,13 +25,15 @@ type GradeScenario = {
   targetGrade: string;
   examWeight: string;
   plannedExamGrade: string;
-  preset: ExamWeightPreset;
+  examRule: ExamRule;
 };
 
 type CalculationResult = {
   schoolGrade: number;
   requiredExamGrade: number;
   projectedFinalGrade: number | null;
+  examWeight: number;
+  finalWithoutExam: number;
   hasAllTerms: boolean;
   message: string;
   tone: 'good' | 'warning' | 'danger';
@@ -47,9 +49,9 @@ const defaultScenario: GradeScenario = {
   term2: '',
   term3: '',
   targetGrade: '60',
-  examWeight: '50',
+  examWeight: '20',
   plannedExamGrade: '',
-  preset: 'secondary45',
+  examRule: 'uniform20Bonus',
 };
 
 const termWeights = [
@@ -67,6 +69,15 @@ const officialLinks = [
     label: 'Quebec secondary report-card subject weightings',
     url: 'https://www.quebec.ca/education/prescolaire-primaire-et-secondaire/programmes-formations-evaluation/epreuves-ministerielles-evaluation-apprentissages/ponderations-libelles-bulletin/secondaire',
   },
+];
+
+const uniformCourses = [
+  'Sec IV Science and Technology',
+  'Sec IV CST Math 414',
+  'Sec IV Science Math 426',
+  'Sec IV History / Histoire',
+  'Sec V English',
+  'Sec V French, Second Language',
 ];
 
 function makeId() {
@@ -90,6 +101,34 @@ function formatPercent(value: number) {
   return `${value.toFixed(1).replace(/\.0$/, '')}%`;
 }
 
+function getExamRule(scenario: GradeScenario & { preset?: 'secondary45' | 'custom' }): ExamRule {
+  return scenario.examRule ?? (scenario.preset === 'secondary45' ? 'uniform20Bonus' : 'custom');
+}
+
+function calculateProjectedFinal(schoolGrade: number, examGrade: number, examWeight: number, rule: ExamRule) {
+  if (rule === 'nonUniform') {
+    return schoolGrade;
+  }
+
+  if (rule === 'uniform20Bonus' && examGrade > schoolGrade) {
+    return examGrade;
+  }
+
+  return schoolGrade * (1 - examWeight) + examGrade * examWeight;
+}
+
+function calculateRequiredExam(schoolGrade: number, targetGrade: number, examWeight: number, rule: ExamRule) {
+  if (rule === 'nonUniform') {
+    return targetGrade <= schoolGrade ? 0 : Number.POSITIVE_INFINITY;
+  }
+
+  if (rule === 'uniform20Bonus' && targetGrade > schoolGrade) {
+    return targetGrade;
+  }
+
+  return examWeight > 0 ? (targetGrade - schoolGrade * (1 - examWeight)) / examWeight : targetGrade;
+}
+
 function calculateScenario(scenario: GradeScenario): CalculationResult {
   const grades = termWeights.map((term) => parsePercent(scenario[term.id]));
   const hasAllTerms = termWeights.every((term) => scenario[term.id].trim() !== '');
@@ -98,23 +137,43 @@ function calculateScenario(scenario: GradeScenario): CalculationResult {
     0,
   );
   const targetGrade = parsePercent(scenario.targetGrade || '60');
-  const examWeight = parsePercent(scenario.examWeight || '50') / 100;
-  const schoolWeight = 1 - examWeight;
-  const requiredExamGrade =
-    examWeight > 0 ? (targetGrade - schoolGrade * schoolWeight) / examWeight : targetGrade;
+  const rule = getExamRule(scenario);
+  const examWeight = rule === 'nonUniform' ? 0 : parsePercent(scenario.examWeight || '20') / 100;
+  const finalWithoutExam = calculateProjectedFinal(schoolGrade, 0, examWeight, rule);
+  const requiredExamGrade = calculateRequiredExam(schoolGrade, targetGrade, examWeight, rule);
   const plannedExamGrade =
     scenario.plannedExamGrade.trim() === '' ? null : parsePercent(scenario.plannedExamGrade);
   const projectedFinalGrade =
-    plannedExamGrade === null ? null : schoolGrade * schoolWeight + plannedExamGrade * examWeight;
+    plannedExamGrade === null
+      ? null
+      : calculateProjectedFinal(schoolGrade, plannedExamGrade, examWeight, rule);
 
   if (!hasAllTerms) {
     return {
       schoolGrade,
       requiredExamGrade,
       projectedFinalGrade,
+      examWeight,
+      finalWithoutExam,
       hasAllTerms,
       message: 'Enter all three term grades to calculate the required exam mark.',
       tone: 'warning',
+    };
+  }
+
+  if (rule === 'nonUniform') {
+    const reachesTarget = schoolGrade >= targetGrade;
+    return {
+      schoolGrade,
+      requiredExamGrade,
+      projectedFinalGrade,
+      examWeight,
+      finalWithoutExam,
+      hasAllTerms,
+      message: reachesTarget
+        ? 'This course has no uniform MEQ exam, so the school result is the final mark in this calculator.'
+        : 'This course has no uniform MEQ exam, so the entered school result does not reach the target.',
+      tone: reachesTarget ? 'good' : 'danger',
     };
   }
 
@@ -123,8 +182,10 @@ function calculateScenario(scenario: GradeScenario): CalculationResult {
       schoolGrade,
       requiredExamGrade,
       projectedFinalGrade,
+      examWeight,
+      finalWithoutExam,
       hasAllTerms,
-      message: 'The entered school result already reaches the target in the simple weighted model.',
+      message: 'The entered school result already reaches the target before adding the exam mark.',
       tone: 'good',
     };
   }
@@ -134,8 +195,10 @@ function calculateScenario(scenario: GradeScenario): CalculationResult {
       schoolGrade,
       requiredExamGrade,
       projectedFinalGrade,
+      examWeight,
+      finalWithoutExam,
       hasAllTerms,
-      message: 'The target cannot be reached with a 100% exam mark in the simple weighted model.',
+      message: 'The target cannot be reached with a 100% exam mark under the selected rule.',
       tone: 'danger',
     };
   }
@@ -144,8 +207,10 @@ function calculateScenario(scenario: GradeScenario): CalculationResult {
     schoolGrade,
     requiredExamGrade,
     projectedFinalGrade,
+    examWeight,
+    finalWithoutExam,
     hasAllTerms,
-    message: `A ministry exam mark of ${formatPercent(requiredExamGrade)} is required to reach ${formatPercent(
+    message: `An exam mark of ${formatPercent(requiredExamGrade)} is required to reach ${formatPercent(
       targetGrade,
     )}.`,
     tone: requiredExamGrade <= 60 ? 'good' : 'warning',
@@ -164,7 +229,13 @@ function loadScenarios() {
 
   try {
     const parsed = JSON.parse(saved) as GradeScenario[];
-    return parsed.length ? parsed : [defaultScenario];
+    return parsed.length
+      ? parsed.map((scenario) => ({
+          ...scenario,
+          examWeight: scenario.examWeight === '50' ? '20' : scenario.examWeight,
+          examRule: getExamRule(scenario),
+        }))
+      : [defaultScenario];
   } catch {
     return [defaultScenario];
   }
@@ -209,10 +280,16 @@ function App() {
     );
   }
 
-  function handlePresetChange(preset: ExamWeightPreset) {
-    updateScenario('preset', preset);
-    if (preset === 'secondary45') {
-      updateScenario('examWeight', '50');
+  function handleExamRuleChange(examRule: ExamRule) {
+    updateScenario('examRule', examRule);
+    if (examRule === 'uniform20Bonus') {
+      updateScenario('examWeight', '20');
+    }
+    if (examRule === 'nonUniform') {
+      updateScenario('examWeight', '0');
+    }
+    if (examRule === 'custom' && activeScenario.examWeight === '0') {
+      updateScenario('examWeight', '20');
     }
   }
 
@@ -304,8 +381,8 @@ function App() {
                 <h2 className="font-bold">Official basis</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
                   Quebec states that students need a final result of 60% or more to pass. For
-                  Secondary 4 and 5 ministerial exams, the moderated school mark and exam mark each
-                  count for 50% for evaluated competencies.
+                  WHS courses with a Uniform MEQ exam, the June school mark counts for 80% and the
+                  uniform exam counts for 20%, unless the exam mark is higher than the school mark.
                 </p>
               </div>
             </div>
@@ -331,7 +408,7 @@ function App() {
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <p className="label">Course setup</p>
-                <h2 className="mt-1 text-xl font-bold">School terms and exam weight</h2>
+                <h2 className="mt-1 text-xl font-bold">School terms and MEQ exam rule</h2>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <button type="submit" className="primary-button">
@@ -400,10 +477,11 @@ function App() {
                 <span className="label">Calculation rule</span>
                 <select
                   className="field mt-1"
-                  value={activeScenario.preset}
-                  onChange={(event) => handlePresetChange(event.target.value as ExamWeightPreset)}
+                  value={getExamRule(activeScenario)}
+                  onChange={(event) => handleExamRuleChange(event.target.value as ExamRule)}
                 >
-                  <option value="secondary45">Secondary 4/5 ministry exam: 50% exam</option>
+                  <option value="uniform20Bonus">Uniform MEQ exam (WHS rule)</option>
+                  <option value="nonUniform">No uniform MEQ exam</option>
                   <option value="custom">Custom exam weight</option>
                 </select>
               </label>
@@ -412,15 +490,22 @@ function App() {
                 <input
                   className="field mt-1 text-lg font-bold"
                   type="number"
-                  min="1"
+                  min="0"
                   max="100"
                   step="1"
                   inputMode="numeric"
                   value={activeScenario.examWeight}
-                  disabled={activeScenario.preset === 'secondary45'}
+                  disabled={getExamRule(activeScenario) !== 'custom'}
                   onChange={(event) => updateScenario('examWeight', event.target.value)}
                 />
               </label>
+            </div>
+
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="label">Uniform MEQ exam courses</p>
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                {uniformCourses.join(', ')}.
+              </p>
             </div>
           </section>
 
@@ -433,13 +518,15 @@ function App() {
             <ResultCard
               label="Required exam"
               value={
-                result.hasAllTerms
+                getExamRule(activeScenario) === 'nonUniform'
+                  ? 'N/A'
+                  : result.hasAllTerms
                   ? result.requiredExamGrade > 100
                     ? '>100%'
                     : formatPercent(Math.max(0, result.requiredExamGrade))
                   : '-'
               }
-              helper="Minimum ministry exam mark needed for the target."
+              helper="Minimum uniform exam mark needed for the target."
             />
             <ResultCard
               label="Target final result"
@@ -519,12 +606,15 @@ function App() {
               <div>
                 <h2 className="font-bold">Calculation used</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  School result = Term 1 x 20% + Term 2 x 20% + Term 3 x 60%. Required exam =
-                  (target - school result x school weight) / exam weight.
+                  School result = Term 1 x 20% + Term 2 x 20% + Term 3 x 60%. For WHS courses with
+                  a Uniform MEQ exam, final result = school result x 80% + exam result x 20%, or
+                  the exam result itself if the exam mark is higher than the school result.
                 </p>
                 <p className="mt-2 text-sm leading-6 text-slate-600">
-                  This is a planning calculator. Quebec final results may use conversion and
-                  moderation, and the official result in the student record is the authority.
+                  Final marks for uniform-exam courses appear on the Provincial Report Card, also
+                  called the Releve des Apprentissages. WHS notes the 2026 online academic record is
+                  available as of July 7, 2026. This remains a planning calculator because Quebec
+                  final results may use conversion and moderation.
                 </p>
               </div>
             </div>
